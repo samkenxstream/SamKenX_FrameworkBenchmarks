@@ -29,6 +29,7 @@
 #include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 
 #include "database.h"
 #include "error.h"
@@ -46,7 +47,7 @@
 	"[-b <bind address>] " \
 	"[-c <certificate file>] " \
 	"[-d <database connection string>] " \
-	"[-e <max pipelined database queries>] " \
+	"[-e <max pipelined database queries per database connection>] " \
 	"[-f <template file path>] " \
 	"[-j <max reused JSON generators>] " \
 	"[-k <private key file>] " \
@@ -139,7 +140,15 @@ static int initialize_global_data(const config_t *config, global_data_t *global_
 	global_data->global_thread_data = initialize_global_thread_data(config, global_data);
 
 	if (global_data->global_thread_data) {
-		printf("Number of processors: %zu\nMaximum cache line size: %zu\n",
+		struct utsname name = {.sysname = {'\0'}};
+
+		uname(&name);
+		printf("Operating system: %s %s %s\n"
+		       "Number of processors: %zu\n"
+		       "Maximum cache line size: %zu\n",
+		       name.sysname,
+		       name.release,
+		       name.version,
 		       h2o_numproc(),
 		       global_data->memory_alignment);
 		return 0;
@@ -264,7 +273,7 @@ static void set_default_options(config_t *config)
 		config->max_accept = 10;
 
 	if (!config->max_db_conn_num)
-		config->max_db_conn_num = 10;
+		config->max_db_conn_num = 1;
 
 	if (!config->max_pipeline_query_num)
 		config->max_pipeline_query_num = 16;

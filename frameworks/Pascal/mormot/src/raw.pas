@@ -1,8 +1,12 @@
 program raw;
 
 {
-TechEmpower framework benchmarks implementation
-See https://github.com/TechEmpower/FrameworkBenchmarks/wiki/Project-Information-Framework-Tests-Overview
+ ----------------------------------------------------
+   TechEmpower Framework Benchmarks implementation
+   in modern pascal and the mORMot 2 framework
+ ----------------------------------------------------
+ https://github.com/TechEmpower/FrameworkBenchmarks/wiki
+ command line optional syntax: raw [threads] [cores] [servers]
 }
 
 {$I mormot.defines.inc}
@@ -11,10 +15,9 @@ See https://github.com/TechEmpower/FrameworkBenchmarks/wiki/Project-Information-
 // logging is fine for debugging, less for benchmarking ;)
 
 uses
-  {$I mormot.uses.inc} // include mormot.core.fpcx64mm
+  {$I mormot.uses.inc} // include mormot.core.fpcx64mm or mormot.core.fpclibcmm
   sysutils,
   classes,
-  BaseUnix,
   mormot.core.base,
   mormot.core.os,
   mormot.core.rtti,
@@ -28,16 +31,17 @@ uses
   mormot.core.perf,
   mormot.core.mustache,
   mormot.orm.core,
+  mormot.orm.base,
   mormot.orm.sql,
   mormot.db.core,
   mormot.db.raw.sqlite3,
   mormot.db.raw.sqlite3.static,
+  mormot.db.sql,
+  mormot.db.sql.postgres,
   mormot.rest.sqlite3,
   mormot.net.http,
   mormot.net.server,
-  mormot.net.async,
-  mormot.db.sql,
-  mormot.db.sql.postgres;
+  mormot.net.async;
 
 type
   // data structures
@@ -64,7 +68,7 @@ type
       read fRandomNumber write fRandomNumber;
   end;
   TOrmCachedWorld = class(TOrmWorld);
-  TOrmWorldClass = class of TOrmWorld;
+  TOrmWorlds = array of TOrmWorld;
   TOrmFortune = class(TOrm)
   protected
     fMessage: RawUtf8;
@@ -83,69 +87,65 @@ type
     fStore: TRestServerDB;
     fTemplate: TSynMustache;
   protected
-    // as used by rawqueries and rawupdates
-    procedure getRawRandomWorlds(cnt: PtrInt; out res: TWorlds);
-    // implements /queries and /cached-queries endpoints
-    function doqueries(ctxt: THttpServerRequestAbstract; orm: TOrmWorldClass;
-      const search: RawUtf8): cardinal;
+    // as used by /rawqueries and /rawupdates
+    function GetRawRandomWorlds(cnt: PtrInt; out res: TWorlds): boolean;
   public
     constructor Create(threadCount: integer; flags: THttpServerOptions); reintroduce;
     destructor Destroy; override;
   published
     // all service URI are implemented by these published methods using RTTI
-    function plaintext(ctxt: THttpServerRequestAbstract): cardinal;
-    function json(ctxt: THttpServerRequestAbstract): cardinal;
-    function db(ctxt: THttpServerRequestAbstract): cardinal;
-    function queries(ctxt: THttpServerRequestAbstract): cardinal;
-    function cached_queries(ctxt: THttpServerRequestAbstract): cardinal;
-    function fortunes(ctxt: THttpServerRequestAbstract): cardinal;
-    function updates(ctxt: THttpServerRequestAbstract): cardinal;
-    function rawdb(ctxt: THttpServerRequestAbstract): cardinal;
-    function rawqueries(ctxt: THttpServerRequestAbstract): cardinal;
-    function rawfortunes(ctxt: THttpServerRequestAbstract): cardinal;
-    function rawupdates(ctxt: THttpServerRequestAbstract): cardinal;
+    function plaintext(ctxt: THttpServerRequest): cardinal;
+    function json(ctxt: THttpServerRequest): cardinal;
+    function db(ctxt: THttpServerRequest): cardinal;
+    function queries(ctxt: THttpServerRequest): cardinal;
+    function cached_queries(ctxt: THttpServerRequest): cardinal;
+    function fortunes(ctxt: THttpServerRequest): cardinal;
+    function updates(ctxt: THttpServerRequest): cardinal;
+    function rawdb(ctxt: THttpServerRequest): cardinal;
+    function rawqueries(ctxt: THttpServerRequest): cardinal;
+    function rawfortunes(ctxt: THttpServerRequest): cardinal;
+    function rawupdates(ctxt: THttpServerRequest): cardinal;
   end;
 
 const
-  TEXT_CONTENT_TYPE_NO_ENCODING: RawUtf8 = 'text/plain';
   HELLO_WORLD: RawUtf8 = 'Hello, World!';
-  WORLD_COUNT = 10000;
+  TEXT_CONTENT_TYPE_NO_ENCODING: RawUtf8 = 'text/plain';
 
-  WORLD_READ_SQL = 'select id, randomNumber from World where id=?';
+  WORLD_COUNT      = 10000;
+  WORLD_READ_SQL   = 'select id,randomNumber from World where id=?';
   WORLD_UPDATE_SQLN ='update World as t set randomNumber = v.r from ' +
-    '(SELECT unnest(?::NUMERIC[]), unnest(?::NUMERIC[]) order by 2) as v(id, r)' +
+    '(SELECT unnest(?::bigint[]), unnest(?::bigint[]) order by 1) as v(id, r)' +
     ' where t.id = v.id';
-  FORTUNES_SQL = 'select id, message from Fortune';
+  FORTUNES_SQL     = 'select id,message from Fortune';
 
   FORTUNES_MESSAGE = 'Additional fortune added at request time.';
-  FORTUNES_TPL = '<!DOCTYPE html>' +
-                 '<html>' +
-                 '<head><title>Fortunes</title></head>' +
-                 '<body>' +
-                 '<table>' +
-                 '<tr><th>id</th><th>message</th></tr>' +
-                 '{{#.}}' +
-                 '<tr><td>{{id}}</td><td>{{message}}</td></tr>' +
-                 '{{/.}}' +
-                 '</table>' +
-                 '</body>' +
-                 '</html>';
+  FORTUNES_TPL     = '<!DOCTYPE html>' +
+                     '<html>' +
+                     '<head><title>Fortunes</title></head>' +
+                     '<body>' +
+                     '<table>' +
+                     '<tr><th>id</th><th>message</th></tr>' +
+                     '{{#.}}' +
+                     '<tr><td>{{id}}</td><td>{{message}}</td></tr>' +
+                     '{{/.}}' +
+                     '</table>' +
+                     '</body>' +
+                     '</html>';
 
 
-function RandomWorld: integer; inline;
+function ComputeRandomWorld: integer; inline;
 begin
   result := Random32(WORLD_COUNT) + 1;
 end;
 
-function getQueriesParamValue(ctxt: THttpServerRequestAbstract;
+function GetQueriesParamValue(ctxt: THttpServerRequest;
   const search: RawUtf8 = 'QUERIES='): cardinal;
 begin
-  if not ctxt.UrlParam(search, result) then
+  if not ctxt.UrlParam(search, result) or
+     (result = 0) then
     result := 1
   else if result > 500 then
-    result := 500
-  else if result < 1 then
-    result := 1;
+    result := 500;
 end;
 
 
@@ -157,34 +157,46 @@ begin
   inherited Create;
   fDbPool := TSqlDBPostgresConnectionProperties.Create(
     'tfb-database:5432', 'hello_world', 'benchmarkdbuser', 'benchmarkdbpass');
+  // customize JSON serialization for TFB expectations
+  TOrmWorld.OrmProps.Fields.JsonRenameProperties([
+    'ID',           'id',
+    'RandomNumber', 'randomNumber']);
+  TOrmCachedWorld.OrmProps.Fields.JsonRenameProperties([
+    'ID',           'id',
+    'RandomNumber', 'randomNumber']);
+  // setup the ORM data model
   fModel := TOrmModel.Create([TOrmWorld, TOrmFortune, TOrmCachedWorld]);
   OrmMapExternal(fModel, [TOrmWorld, TOrmFortune], fDbPool);
   // CachedWorld table doesn't exists in DB, but should as read in requirements.
   // Use world table as in other implementations.
   OrmMapExternal(fModel, TOrmCachedWorld, fDbPool, 'world');
+  // setup the main ORM store
   fStore := TRestServerDB.Create(fModel, SQLITE_MEMORY_DATABASE_NAME);
   fStore.NoAjaxJson := true;
   fStore.Server.CreateMissingTables; // create SQlite3 virtual tables
   if fStore.Server.Cache.SetCache(TOrmCachedWorld) then
     fStore.Server.Cache.FillFromQuery(TOrmCachedWorld, '', []);
+  // initialize the mustache template for /fortunes
   fTemplate := TSynMustache.Parse(FORTUNES_TPL);
+  // setup the HTTP server
   fHttpServer := THttpAsyncServer.Create(
     '8080', nil, nil, '', threadCount,
     5 * 60 * 1000,         // 5 minutes keep alive connections
     [hsoNoXPoweredHeader,  // not needed for a benchmark
      hsoHeadersInterning,  // reduce memory contention for /plaintext and /json
      hsoNoStats,           // disable low-level statistic counters
-     //hsoThreadCpuAffinity, // better scaling of /plaintext in some cases
-     hsoReusePort,         // allow several processes binding on the same port
+     //hsoThreadCpuAffinity, // worse scaling on multi-servers
+     hsoThreadSmooting,    // seems a good option, even if not magical
      {$ifdef WITH_LOGS}
      hsoLogVerbose,
      {$endif WITH_LOGS}
      hsoIncludeDateHeader  // required by TPW General Test Requirements #5
     ] + flags);
-  fHttpServer.HttpQueueLength := 100000; // needed e.g. from wrk/ab benchmarks
+  fHttpServer.HttpQueueLength := 10000; // needed e.g. from wrk/ab benchmarks
+  // use default routing using RTTI on the TRawAsyncServer published methods
   fHttpServer.Route.RunMethods([urmGet], self);
-  // writeln(fHttpServer.Route.Tree[urmGet].ToText);
-  fHttpServer.WaitStarted; // raise exception e.g. on binding issue
+  // wait for the server to be ready and raise exception e.g. on binding issue
+  fHttpServer.WaitStarted;
 end;
 
 destructor TRawAsyncServer.Destroy;
@@ -196,131 +208,100 @@ begin
   inherited Destroy;
 end;
 
-function TRawAsyncServer.plaintext(ctxt: THttpServerRequestAbstract): cardinal;
+// query DB world table for /rawqueries and /rawupdates endpoints
+
+function TRawAsyncServer.GetRawRandomWorlds(cnt: PtrInt; out res: TWorlds): boolean;
+var
+  conn: TSqlDBConnection;
+  stmt: ISQLDBStatement;
+  pConn: TSqlDBPostgresConnection absolute conn;
+  pStmt: TSqlDBPostgresStatement;
+  i: PtrInt;
 begin
-  ctxt.OutContentType := TEXT_CONTENT_TYPE_NO_ENCODING;
+  result := false;
+  SetLength(res{%H-}, cnt);
+  conn := fDbPool.ThreadSafeConnection;
+  // specific code to use PostgresSQL pipelining mode
+  // see test_nosync in
+  // https://github.com/postgres/postgres/blob/master/src/test/modules/libpq_pipeline/libpq_pipeline.c
+  stmt := conn.NewStatementPrepared(WORLD_READ_SQL, true, true);
+  pConn.EnterPipelineMode;
+  pStmt := TSqlDBPostgresStatement(stmt.Instance);
+  for i := 0 to cnt - 1 do
+  begin
+    pStmt.Bind(1, ComputeRandomWorld);
+    pStmt.SendPipelinePrepared;
+    pConn.PipelineSync;
+  end;
+  for i := 0 to cnt - 1 do
+  begin
+    pStmt.GetPipelineResult;
+    if not stmt.Step then
+      exit;
+    res[i].id := pStmt.ColumnInt(0);
+    res[i].randomNumber := pStmt.ColumnInt(1);
+    pStmt.ReleaseRows;
+    pConn.CheckPipelineSync;
+  end;
+  pConn.ExitPipelineMode;
+  result := true;
+end;
+
+// following methods implement the server endpoints
+
+function TRawAsyncServer.plaintext(ctxt: THttpServerRequest): cardinal;
+begin
   ctxt.OutContent := HELLO_WORLD;
+  ctxt.OutContentType := TEXT_CONTENT_TYPE_NO_ENCODING;
   result := HTTP_SUCCESS;
 end;
 
-function TRawAsyncServer.json(ctxt: THttpServerRequestAbstract): cardinal;
+function TRawAsyncServer.json(ctxt: THttpServerRequest): cardinal;
 var
   msgRec: TMessageRec;
 begin
   msgRec.message := HELLO_WORLD;
-  ctxt.SetOutJson(SaveJson(msgRec, TypeInfo(TMessageRec)));
+  ctxt.SetOutJson(@msgRec, TypeInfo(TMessageRec));
   result := HTTP_SUCCESS;
 end;
 
-function TRawAsyncServer.rawdb(ctxt: THttpServerRequestAbstract): cardinal;
-var
-  conn: TSqlDBConnection;
-  stmt: ISQLDBStatement;
-begin
-  result := HTTP_SERVERERROR;
-  conn := fDbPool.ThreadSafeConnection;
-  stmt := conn.NewStatementPrepared(WORLD_READ_SQL, true, true);
-  stmt.Bind(1, RandomWorld);
-  stmt.ExecutePrepared;
-  if stmt.Step then
-  begin
-    ctxt.SetOutJson('{"id":%,"randomNumber":%}',
-      [stmt.ColumnInt(0), stmt.ColumnInt(1)]);
-    result := HTTP_SUCCESS;
-    stmt.ReleaseRows;
-  end;
-  stmt := nil;
-end;
-
-function TRawAsyncServer.db(ctxt: THttpServerRequestAbstract): cardinal;
+function TRawAsyncServer.db(ctxt: THttpServerRequest): cardinal;
 var
   w: TOrmWorld;
 begin
-  w := TOrmWorld.Create(fStore.Orm, RandomWorld);
+  w := TOrmWorld.Create(fStore.Orm, ComputeRandomWorld);
   try
-    ctxt.SetOutJson('{"id":%,"randomNumber":%}', [w.IDValue, w.randomNumber]);
+    ctxt.SetOutJson(w);
     result := HTTP_SUCCESS;
   finally
     w.Free;
   end;
 end;
 
-function TRawAsyncServer.queries(ctxt: THttpServerRequestAbstract): cardinal;
-begin
-  result := doqueries(ctxt, TOrmWorld, 'QUERIES=');
-end;
-
-function TRawAsyncServer.cached_queries(ctxt: THttpServerRequestAbstract): cardinal;
-begin
-  result := doqueries(ctxt, TOrmCachedWorld, 'COUNT=');
-end;
-
-procedure TRawAsyncServer.getRawRandomWorlds(cnt: PtrInt; out res: TWorlds);
+function TRawAsyncServer.queries(ctxt: THttpServerRequest): cardinal;
 var
-  conn: TSqlDBConnection;
-  stmt: ISQLDBStatement;
-  pStmt: TSqlDBPostgresStatement;
   i: PtrInt;
+  res: TOrmWorlds;
 begin
-  SetLength(res{%H-}, cnt);
-  conn := fDbPool.ThreadSafeConnection;
-  stmt := conn.NewStatementPrepared(WORLD_READ_SQL, true, true);
-  // specific code to use PostgresSQL pipelining mode
-  TSqlDBPostgresConnection(conn).EnterPipelineMode;
-  pStmt := (stmt as TSqlDBPostgresStatement);
-  for i := 0 to cnt - 1 do
-  begin
-    stmt.Bind(1, RandomWorld);
-    pStmt.SendPipelinePrepared;
-  end;
-  TSqlDBPostgresConnection(conn).PipelineSync;
-  for i := 0 to cnt - 1 do
-  begin
-    pStmt.GetPipelineResult(i = 0);
-    if not stmt.Step then
-      exit;
-    res[i].id := stmt.ColumnInt(0);
-    res[i].randomNumber := stmt.ColumnInt(1);
-  end;
-  TSqlDBPostgresConnection(conn).ExitPipelineMode(true);
-end;
-
-function TRawAsyncServer.rawqueries(ctxt: THttpServerRequestAbstract): cardinal;
-var
-  cnt: PtrInt;
-  res: TWorlds;
-begin
-  cnt := getQueriesParamValue(ctxt);
-  getRawRandomWorlds(cnt, res);
-  if res = nil then
-    exit(HTTP_SERVERERROR);
-  ctxt.SetOutJson(SaveJson(res, TypeInfo(TWorlds)));
+  SetLength(res, GetQueriesParamValue(ctxt, 'QUERIES='));
+  for i := 0 to length(res) - 1 do
+    res[i] := TOrmWorld.Create(fStore.Orm, ComputeRandomWorld);
+  ctxt.SetOutJson(@res, TypeInfo(TOrmWorlds));
+  ObjArrayClear(res);
   result := HTTP_SUCCESS;
 end;
 
-function TRawAsyncServer.doqueries(ctxt: THttpServerRequestAbstract;
-  orm: TOrmWorldClass; const search: RawUtf8): cardinal;
+function TRawAsyncServer.cached_queries(ctxt: THttpServerRequest): cardinal;
 var
-  cnt, i: PtrInt;
-  res: TWorlds;
-  w: TOrmWorld;
+  i: PtrInt;
+  res: TOrmWorlds;
+  cache: POrmCacheTable;
 begin
-  result := HTTP_SERVERERROR;
-  cnt := getQueriesParamValue(ctxt, search);
-  SetLength(res, cnt);
-  w := orm.Create; // TOrmWorld or TOrmCachedWorld
-  try
-    for i := 0 to cnt - 1 do
-    begin
-      if not fStore.Orm.Retrieve(RandomWorld, w) then
-        exit;
-      res[i].id := w.IDValue;
-      res[i].randomNumber := w.RandomNumber;
-    end;
-  finally
-    w.Free;
-  end;
-  ctxt.SetOutJson(SaveJson(res, TypeInfo(TWorlds)));
+  cache := fStore.Orm.Cache.Table(TOrmCachedWorld);
+  SetLength(res, GetQueriesParamValue(ctxt, 'COUNT='));
+  for i := 0 to length(res) - 1 do
+    res[i] := cache.Get(ComputeRandomWorld);
+  ctxt.SetOutJson(@res, TypeInfo(TOrmWorlds));
   result := HTTP_SUCCESS;
 end;
 
@@ -329,7 +310,7 @@ begin
   result := StrComp(pointer(TOrmFortune(A).Message), pointer(TOrmFortune(B).Message));
 end;
 
-function TRawAsyncServer.fortunes(ctxt: THttpServerRequestAbstract): cardinal;
+function TRawAsyncServer.fortunes(ctxt: THttpServerRequest): cardinal;
 var
   list: TOrmFortunes;
   new: TOrmFortune;
@@ -351,19 +332,79 @@ begin
     end;
 end;
 
+function TRawAsyncServer.updates(ctxt: THttpServerRequest): cardinal;
+var
+  i: PtrInt;
+  res: TOrmWorlds;
+  w: TOrmWorld;
+  b: TRestBatch;
+begin
+  result := HTTP_SERVERERROR;
+  SetLength(res, GetQueriesParamValue(ctxt));
+  b := TRestBatch.Create(fStore.ORM, TOrmWorld, {transrows=}0,
+    [boExtendedJson, boNoModelEncoding, boPutNoCacheFlush]);
+  try
+    for i := 0 to length(res) - 1 do
+    begin
+      w := TOrmWorld.Create;
+      res[i] := w;
+      if not fStore.Orm.Retrieve(ComputeRandomWorld, w) then
+        exit;
+      w.RandomNumber := ComputeRandomWorld;
+      b.Update(w);
+    end;
+    result := b.Send;
+    if result = HTTP_SUCCESS then
+      ctxt.SetOutJson(@res, TypeInfo(TOrmWorlds));
+  finally
+    b.Free;
+    ObjArrayClear(res);
+  end;
+end;
+
+function TRawAsyncServer.rawdb(ctxt: THttpServerRequest): cardinal;
+var
+  conn: TSqlDBConnection;
+  stmt: ISQLDBStatement;
+begin
+  result := HTTP_SERVERERROR;
+  conn := fDbPool.ThreadSafeConnection;
+  stmt := conn.NewStatementPrepared(WORLD_READ_SQL, true, true);
+  stmt.Bind(1, ComputeRandomWorld);
+  stmt.ExecutePrepared;
+  if stmt.Step then
+  begin
+    ctxt.SetOutJson(
+      '{"id":%,"randomNumber":%}', [stmt.ColumnInt(0), stmt.ColumnInt(1)]);
+    result := HTTP_SUCCESS;
+    stmt.ReleaseRows;
+  end;
+  stmt := nil;
+end;
+
+function TRawAsyncServer.rawqueries(ctxt: THttpServerRequest): cardinal;
+var
+  res: TWorlds;
+begin
+  if not GetRawRandomWorlds(GetQueriesParamValue(ctxt), res) then
+    exit(HTTP_SERVERERROR);
+  ctxt.SetOutJson(@res, TypeInfo(TWorlds));
+  result := HTTP_SUCCESS;
+end;
+
 function FortuneCompareByMessage(const A, B): integer;
 begin
   result := StrComp(pointer(TFortune(A).message), pointer(TFortune(B).message));
 end;
 
-function TRawAsyncServer.rawfortunes(ctxt: THttpServerRequestAbstract): cardinal;
+function TRawAsyncServer.rawfortunes(ctxt: THttpServerRequest): cardinal;
 var
   conn: TSqlDBConnection;
   stmt: ISQLDBStatement;
   list: TFortunes;
-  f: TFortune;
   arr: TDynArray;
   n: integer;
+  f: ^TFortune;
 begin
   conn := fDbPool.ThreadSafeConnection;
   stmt := conn.NewStatementPrepared(FORTUNES_SQL, true, true);
@@ -371,81 +412,103 @@ begin
   arr.Init(TypeInfo(TFortunes), list, @n);
   while stmt.Step do
   begin
+    f := arr.NewPtr;
     f.id := stmt.ColumnInt(0);
     f.message := stmt.ColumnUtf8(1);
-    arr.Add(f);
   end;
+  f := arr.NewPtr;
   f.id := 0;
   f.message := FORTUNES_MESSAGE;
-  arr.Add(f);
   arr.Sort(FortuneCompareByMessage);
   ctxt.OutContent := fTemplate.RenderDataArray(arr);
   ctxt.OutContentType := HTML_CONTENT_TYPE;
   result := HTTP_SUCCESS;
 end;
 
-function TRawAsyncServer.updates(ctxt: THttpServerRequestAbstract): cardinal;
+var
+  LastComputeUpdateSql: RawUtf8;
+  LastComputeUpdateSqlCnt: integer;
+  LastComputeUpdateSqlSafe: TLightLock;
+
+function ComputeUpdateSql(cnt: integer): RawUtf8;
+var
+  i: integer;
+  W: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+begin
+  LastComputeUpdateSqlSafe.Lock;
+  if cnt <> LastComputeUpdateSqlCnt then
+  begin
+    // update table set randomNumber = CASE id when ? then ? when ? then ? ...
+    // when ? then ? else randomNumber end where id in (?,?,?,?,?)
+    // - this weird syntax gives best number for TFB /rawupdates?queries=20 but
+    // seems not good for smaller or higher count - we won't include it in the
+    // ORM but only for our RAW results - as other frameworks (e.g. ntex) do
+    LastComputeUpdateSqlCnt := cnt;
+    W := TTextWriter.CreateOwnedStream(tmp);
+    try
+      W.AddShort('UPDATE world SET randomnumber = CASE id');
+      for i := 1 to cnt do
+        W.AddShort(' when ? then ?');
+      W.AddShort(' else randomNumber end where id in (');
+      repeat
+        W.Add('?', ',');
+        dec(cnt);
+      until cnt = 0;
+      W.CancelLastComma;
+      W.Add(')');
+      W.SetText(LastComputeUpdateSql);
+    finally
+      W.Free;
+    end;
+  end;
+  result := LastComputeUpdateSql;
+  LastComputeUpdateSqlSafe.UnLock;
+end;
+
+function TRawAsyncServer.rawupdates(ctxt: THttpServerRequest): cardinal;
 var
   cnt, i: PtrInt;
   res: TWorlds;
-  w: TOrmWorld;
-  b: TRestBatch;
-begin
-  result := HTTP_SERVERERROR;
-  cnt := getQueriesParamValue(ctxt);
-  SetLength(res, cnt);
-  b := TRestBatch.Create(fStore.ORM, TOrmWorld, {transrows=}0,
-    [boExtendedJson, boNoModelEncoding, boPutNoCacheFlush]);
-  w := TOrmWorld.Create;
-  try
-    for i := 0 to cnt - 1 do
-    begin
-      if not fStore.Orm.Retrieve(RandomWorld, w) then
-        exit;
-      w.RandomNumber := RandomWorld;
-      b.Update(w);
-      res[i].id := w.IDValue;
-      res[i].randomNumber := w.RandomNumber;
-    end;
-    result := fStore.Orm.BatchSend(b);
-  finally
-    w.Free;
-    b.Free;
-  end;
-  if result <> HTTP_SUCCESS then
-    exit;
-  ctxt.SetOutJson(SaveJson(res, TypeInfo(TWorlds)));
-end;
-
-function TRawAsyncServer.rawupdates(ctxt: THttpServerRequestAbstract): cardinal;
-var
-  cnt, i: PtrInt;
-  words: TWorlds;
   ids, nums: TInt64DynArray;
   conn: TSqlDBConnection;
   stmt: ISQLDBStatement;
 begin
-  cnt := getQueriesParamValue(ctxt);
-  getRawRandomWorlds(cnt, words);
-  if length(words) <> cnt then
-    exit(HTTP_SERVERERROR);
-  setLength(ids, cnt);
-  setLength(nums, cnt);
-  // generate new randoms, fill parameters arrays for update
-  for i := 0 to cnt - 1 do
-  begin
-    words[i].randomNumber := RandomWorld;
-    ids[i] := words[i].id;
-    nums[i] := words[i].randomNumber;
-  end;
+  result := HTTP_SERVERERROR;
   conn := fDbPool.ThreadSafeConnection;
-  //conn.StartTransaction;
-  stmt := conn.NewStatementPrepared(WORLD_UPDATE_SQLN, false, true);
-  stmt.BindArray(1, nums);
-  stmt.BindArray(2, ids);
+  cnt := getQueriesParamValue(ctxt);
+  if not getRawRandomWorlds(cnt, res) then
+    exit;
+  // generate new randoms
+  for i := 0 to cnt - 1 do
+    res[i].randomNumber := ComputeRandomWorld;
+  if cnt > 15 then
+  begin
+    // fill parameters arrays for update with nested select (PostgreSQL only)
+    setLength(ids{%H-}, cnt);
+    setLength(nums{%H-}, cnt);
+    for i := 0 to cnt - 1 do
+    begin
+      ids[i] := res[i].id;
+      nums[i] := res[i].randomNumber;
+    end;
+    stmt := conn.NewStatementPrepared(WORLD_UPDATE_SQLN, false, true);
+    stmt.BindArray(1, ids);
+    stmt.BindArray(2, nums);
+  end
+  else
+  begin
+    // fill parameters for update up to 15 items as CASE .. WHEN .. THEN ..
+    stmt := conn.NewStatementPrepared(ComputeUpdateSql(cnt), false, true);
+    for i := 0 to cnt - 1 do
+    begin
+      stmt.Bind(i * 2 + 1, res[i].id);
+      stmt.Bind(i * 2 + 2, res[i].randomNumber);
+      stmt.Bind(cnt * 2 + i + 1, res[i].id);
+    end;
+  end;
   stmt.ExecutePrepared;
-  //conn.Commit; // autocommit
-  ctxt.SetOutJson(SaveJson(words, TypeInfo(TWorlds)));
+  ctxt.SetOutJson(@res, TypeInfo(TWorlds));
   result := HTTP_SUCCESS;
 end;
 
@@ -453,72 +516,85 @@ end;
 
 var
   rawServers: array of TRawAsyncServer;
-  threads, cores, servers, i: integer;
+  threads, servers, i: integer;
   flags: THttpServerOptions;
 
+procedure ComputeExecutionContextFromParams;
+var
+  cores: integer;
 begin
+  // user specified some values at command line: raw [threads] [cores] [servers]
+  // in practice, [cores] is just ignored
+  if not TryStrToInt(ParamStr(1), threads) then
+    threads := SystemInfo.dwNumberOfProcessors * 4;
+  if not TryStrToInt(ParamStr(2), cores) then
+    cores := 16;
+  if not TryStrToInt(ParamStr(3), servers) then
+    servers := 1;
+  if threads < 2 then
+    threads := 2
+  else if threads > 256 then
+    threads := 256; // max. threads for THttpAsyncServer
+  {if SystemInfo.dwNumberOfProcessors > cores then
+    SystemInfo.dwNumberOfProcessors := cores; // for hsoThreadCpuAffinity}
+  if servers < 1 then
+    servers := 1
+  else if servers > 256 then
+    servers := 256;
+end;
+
+procedure ComputeExecutionContextFromNumberOfProcessors;
+var
+  logicalcores: integer;
+begin
+  // automatically guess best parameters depending on available CPU cores
+  logicalcores := SystemInfo.dwNumberOfProcessors;
+  if logicalcores >= 12 then
+  begin
+    // high-end CPU - scale using several listeners (one per core)
+    // see https://synopse.info/forum/viewtopic.php?pid=39263#p39263
+    servers := logicalcores;
+    threads := 8;
+  end
+  else
+  begin
+    // regular CPU - a single instance and a few threads per core
+    servers := 1;
+    threads := logicalcores * 4;
+  end;
+end;
+
+begin
+  // setup logs
   {$ifdef WITH_LOGS}
   TSynLog.Family.Level := LOG_VERBOSE; // disable logs for benchmarking
   TSynLog.Family.HighResolutionTimestamp := true;
-  TSynLog.Family.AutoFlushTimeOut := 1;
-  {$endif WITH_LOGS}
   TSynLog.Family.PerThreadLog := ptIdentifiedInOneFile;
+  TSynLog.Family.AutoFlushTimeOut := 1;
+  {$else}
+  SynDBLog := nil; // slightly faster: no need to check log level
+  {$endif WITH_LOGS}
 
+  // register some RTTI for records JSON serialization
   Rtti.RegisterFromText([
     TypeInfo(TMessageRec), 'message:RawUtf8',
     TypeInfo(TWorldRec),   'id,randomNumber:integer',
     TypeInfo(TFortune),    'id:integer message:RawUtf8']);
 
-  flags := [];
+  // setup execution context
   if ParamCount > 1 then
-  begin
-    // user specified some values at command line
-    if not TryStrToInt(ParamStr(1), threads) then
-      threads := SystemInfo.dwNumberOfProcessors * 4;
-    if threads < 4 then
-      threads := 4
-    else if threads > 256 then
-      threads := 256; // max. threads for THttpAsyncServer
-
-    if not TryStrToInt(ParamStr(2), cores) then
-      cores := 16;
-    if SystemInfo.dwNumberOfProcessors > cores then
-      SystemInfo.dwNumberOfProcessors := cores; //for hsoThreadCpuAffinity
-
-    if not TryStrToInt(ParamStr(3), servers) then
-      servers := 1;
-    if servers < 1 then
-      servers := 1
-    else if servers > 16 then
-      servers := 16;
-  end
+    ComputeExecutionContextFromParams
   else
-  begin
-    // automatically sets best parameters depending on available CPU cores
-    cores := SystemInfo.dwNumberOfProcessors;
-    if cores > 12 then
-    begin
-      // hi-end CPU - scale using several listeners bound to the HW cores
-      threads := cores;
-      if cores div 4 > 6 then
-        servers := 6
-      else
-        servers := cores div 4;
-    end
-    else
-    begin
-      threads := cores * 4;
-      servers := 1;
-    end;
-  end;
-  if servers = 1 then
-    include(flags, hsoThreadSmooting); // 30% better /plaintext e.g. on i5 7300U
+    ComputeExecutionContextFromNumberOfProcessors;
+  if servers > 1 then
+    include(flags, hsoReusePort); // allow several bindings on the same port
 
-  // start the server instance(s), in hsoReusePort mode
+  // start the server instance(s), in hsoReusePort mode if needed
   SetLength(rawServers, servers);
   for i := 0 to servers - 1 do
     rawServers[i] := TRawAsyncServer.Create(threads, flags);
   try
+    // display some information and wait for SIGTERM
     {$I-}
     writeln;
     writeln(rawServers[0].fHttpServer.ClassName,
@@ -528,17 +604,17 @@ begin
             ', num servers=', servers,
             ', total workers=', threads * servers,
             ', db=', rawServers[0].fDbPool.DbmsEngineName);
-    writeln('Press Ctrl+C or use SIGTERM to terminate'#10);
-    FpPause; // mandatory for the actual benchmark tool
+    writeln(' options=', GetSetName(TypeInfo(THttpServerOptions), flags));
+    writeln('Press [Enter] or Ctrl+C or send SIGTERM to terminate'#10);
+    ConsoleWaitForEnterKey;
     //TSynLog.Family.Level := LOG_VERBOSE; // enable shutdown logs for debug
     for i := 0 to servers - 1 do
       writeln(ObjectToJsonDebug(rawServers[i].fHttpServer,
         [woDontStoreVoid, woHumanReadable]));
   finally
-     for i := 0 to servers - 1 do
-      rawServers[i].Free;
+    // clear all server instance(s)
+    ObjArrayClear(rawServers);
   end;
-
   {$ifdef FPC_X64MM}
   WriteHeapStatus(' ', 16, 8, {compileflags=}true);
   {$endif FPC_X64MM}
